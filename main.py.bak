@@ -1,0 +1,1014 @@
+import asyncio
+import json
+import os
+from dataclasses import dataclass, asdict
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, Final
+
+import requests
+import typer
+from loguru import logger
+from openai import AsyncOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# API Configuration
+AMIRABOT_API_BASE_URL: Final[str] = (
+    "https://g7ebdvmssc.execute-api.us-east-2.amazonaws.com/prod"
+)
+API_CONVERSATION_LIST_ENDPOINT: Final[str] = "/conversation/list"
+
+# Default Values
+DEFAULT_PAGE_LIMIT: Final[int] = 100
+DEFAULT_SORT_BY: Final[str] = "createdAt"
+DEFAULT_NEGATIVE_RATING_THRESHOLD: Final[int] = 3
+DEFAULT_EXCESSIVE_TURNS_THRESHOLD: Final[int] = 3
+DEFAULT_CONVERSATIONS_OUTPUT: Final[str] = "conversations.json"
+DEFAULT_ANALYSIS_OUTPUT: Final[str] = "issues.json"
+DEFAULT_MAX_PAGES: Final[int] = 5
+DEFAULT_AI_MODEL: Final[str] = "gpt-5-mini"
+DEFAULT_AI_CONCURRENCY: Final[int] = 100
+DEFAULT_AI_MAX_RETRIES: Final[int] = 3
+
+# JSON Serialization
+JSON_INDENT: Final[int] = 2
+
+# Empty Values
+EMPTY_STRING: Final[str] = ""
+EMPTY_LIST: Final[list] = []
+
+# Numeric Constants
+EXIT_CODE_ERROR: Final[int] = 1
+FIRST_PAGE: Final[int] = 1
+
+
+class ConversationStatus(StrEnum):
+    """Enumeration of possible conversation statuses."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+    ESCALATED = "escalated"
+
+
+class SortDirection(StrEnum):
+    """Sort direction for API queries."""
+
+    ASC = "asc"
+    DESC = "desc"
+
+
+class MessageRole(StrEnum):
+    """Message sender roles."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ApiResponseKey(StrEnum):
+    """API response dictionary keys."""
+
+    FILTERED_CONVOS = "filtered_convos"
+    NEXT_PAGE_TOKEN = "next_page_token"
+    MESSAGES = "messages"
+    ROLE = "sender"
+    CONTENT = "message"
+    TIMESTAMP = "timestamp"
+    ID = "PK"
+    CREATED_AT = "createdAt"
+    CONVO_STATUS = "convo_status"
+    RATING = "rating"
+
+
+class ApiRequestKey(StrEnum):
+    """API request payload keys."""
+
+    FILTER = "filter"
+    LIMIT = "limit"
+    SORT_BY = "sort_by"
+    SORT_DIR = "sort_dir"
+    INCLUDE_MESSAGES = "include_messages"
+    PAGE_TOKEN = "page_token"
+
+
+class IssueType(StrEnum):
+    """Types of conversation quality issues."""
+
+    REPETITIVE = "repetitive"
+    UNHELPFUL = "unhelpful"
+    TOO_MANY_TURNS = "too_many_turns"
+    DEAD_END = "dead_end"
+    NEGATIVE_RATING = "negative_rating"
+    OBVIOUS_WRONG_ANSWER = "obvious_wrong_answer"
+    MISSED_ESCALATION = "missed_escalation"
+    DUMB_QUESTION = "dumb_question"
+    LACK_OF_ENCOURAGEMENT = "lack_of_encouragement"
+
+
+class AnalysisKey(StrEnum):
+    """Quality analysis output keys."""
+
+    TOTAL_ANALYZED = "total_analyzed"
+    REPETITIVE = "repetitive"
+    UNHELPFUL = "unhelpful"
+    TOO_MANY_TURNS = "too_many_turns"
+    DEAD_END = "dead_end"
+    NEGATIVE_RATING = "negative_rating"
+
+
+class DetailKey(StrEnum):
+    """Issue detail dictionary keys."""
+
+    RATING = "rating"
+    MESSAGE_COUNT = "message_count"
+    TURNS = "turns"
+    STATUS = "status"
+
+
+class LogMessage(StrEnum):
+    """Log message templates."""
+
+    FETCHING_PAGE = "Fetching page {}..."
+    RETRIEVED_CONVERSATIONS = "Retrieved {} conversations (total: {})"
+    MAX_PAGES_REACHED = "Reached maximum page limit of {}"
+    ANALYSIS_HEADER = "=== CONVERSATION ANALYSIS ==="
+    TOTAL_ANALYZED = "Total conversations analyzed: {}"
+    ISSUES_FOUND = "Issues found:"
+    ISSUE_COUNT = "  {}: {} conversations"
+    SAVED_CONVERSATIONS = "Saved {} conversations to {}"
+    SAVED_ANALYSIS = "Saved issues analysis to {}"
+    FETCHING_ALL = "Fetching all Amirabot conversations..."
+    ERROR_OCCURRED = "Error occurred: {}"
+
+
+class CliHelp(StrEnum):
+    """CLI help messages."""
+
+    APP = "Amirabot conversation analysis tool"
+    MAX_PAGES = "Maximum number of pages to fetch. If not specified, fetches all pages."
+    NEGATIVE_THRESHOLD = (
+        "Rating threshold below which conversations are flagged as negative."
+    )
+    TURNS_THRESHOLD = (
+        "Message count threshold above which conversations are flagged as excessive."
+    )
+    CONVERSATIONS_OUTPUT = "Output file path for conversations data."
+    ANALYSIS_OUTPUT = "Output file path for analysis results."
+    ANALYZE_COMMAND = """Fetch and analyze Amirabot conversations for quality issues.
+
+This command fetches conversations from the Amirabot API, analyzes them for
+potential quality issues, and saves both the raw conversations and analysis
+results to JSON files."""
+
+
+app = typer.Typer(help=CliHelp.APP)
+
+
+@dataclass
+class Message:
+    """Represents a single message in a conversation.
+
+    Attributes:
+        role: The role of the message sender (e.g., 'user', 'assistant').
+        content: The text content of the message.
+        timestamp: Optional timestamp when the message was created.
+    """
+
+    role: str
+    content: str
+    timestamp: str | None = None
+
+    @classmethod
+    def from_dict(cls, *, data: dict[str, Any]) -> "Message":
+        """Create a Message from a dictionary.
+
+        Args:
+            data: Dictionary containing message data with keys 'role', 'content', and optionally 'timestamp'.
+
+        Returns:
+            Message: A new Message instance populated with data from the dictionary.
+        """
+        return cls(
+            role=data.get(ApiResponseKey.ROLE, EMPTY_STRING),
+            content=data.get(ApiResponseKey.CONTENT, EMPTY_STRING),
+            timestamp=data.get(ApiResponseKey.TIMESTAMP),
+        )
+
+
+@dataclass
+class Conversation:
+    """Represents a conversation with all its metadata.
+
+    Attributes:
+        id: Unique identifier for the conversation.
+        messages: List of Message objects in the conversation.
+        created_at: Timestamp when the conversation was created.
+        status: Current status of the conversation (open, closed, escalated).
+        rating: Optional user rating for the conversation.
+    """
+
+    id: str
+    messages: list[Message]
+    created_at: str
+    status: str | None = None
+    rating: int | None = None
+
+    @classmethod
+    def from_dict(cls, *, data: dict[str, Any]) -> "Conversation":
+        """Create a Conversation from API response dictionary.
+
+        Handles parsing of messages which may be provided as either a JSON string
+        or a list of dictionaries. Converts each message dictionary to a Message object.
+
+        Args:
+            data: Dictionary containing conversation data from the API response.
+
+        Returns:
+            Conversation: A new Conversation instance with parsed messages and metadata.
+        """
+        messages_data = data.get(ApiResponseKey.MESSAGES, [])
+
+        if isinstance(messages_data, str):
+            try:
+                messages_data = json.loads(messages_data)
+            except json.JSONDecodeError:
+                messages_data = []
+
+        messages = [
+            Message.from_dict(data=msg) if isinstance(msg, dict) else msg
+            for msg in messages_data
+        ]
+
+        # Convert rating to int if it's a string
+        rating = data.get(ApiResponseKey.RATING)
+        if rating is not None and isinstance(rating, str):
+            try:
+                rating = int(rating)
+            except (ValueError, TypeError):
+                rating = None
+
+        return cls(
+            id=data.get(ApiResponseKey.ID, EMPTY_STRING),
+            messages=messages,
+            created_at=data.get(ApiResponseKey.CREATED_AT, EMPTY_STRING),
+            status=data.get(ApiResponseKey.CONVO_STATUS),
+            rating=rating,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert conversation to dictionary for serialization.
+
+        Returns:
+            dict[str, Any]: Dictionary representation of the conversation.
+        """
+        return asdict(self)
+
+
+@dataclass
+class ConversationIssue:
+    """Represents an identified issue in a conversation.
+
+    Attributes:
+        conversation_id: ID of the conversation with the issue.
+        issue_type: Type of issue identified (e.g., 'repetitive', 'unhelpful').
+        details: Additional details about the issue.
+        severity_score: Severity rating from 1-10 (AI-generated, optional).
+        ai_reasoning: Explanation from AI about why this is an issue (optional).
+        excerpt: Relevant conversation snippet demonstrating the issue (optional).
+    """
+
+    conversation_id: str
+    issue_type: str
+    details: dict[str, Any]
+    severity_score: int | None = None
+    ai_reasoning: str | None = None
+    excerpt: str | None = None
+
+
+@dataclass
+class QualityAnalysis:
+    """Results of conversation quality analysis.
+
+    Attributes:
+        total_analyzed: Total number of conversations analyzed.
+        repetitive: List of conversations with repetitive bot responses.
+        unhelpful: List of conversations with unhelpful responses.
+        too_many_turns: List of conversations with excessive back-and-forth.
+        dead_end: List of conversations that reached a dead end.
+        negative_rating: List of conversations with negative user ratings.
+        obvious_wrong_answers: List of conversations where obvious questions were answered incorrectly.
+        missed_escalation: List of conversations where human escalation should have happened.
+        dumb_questions: List of conversations where Amirabot asked inappropriate questions.
+        lack_of_encouragement: List of conversations where Amirabot discouraged users.
+    """
+
+    total_analyzed: int
+    repetitive: list[ConversationIssue]
+    unhelpful: list[ConversationIssue]
+    too_many_turns: list[ConversationIssue]
+    dead_end: list[ConversationIssue]
+    negative_rating: list[ConversationIssue]
+    obvious_wrong_answers: list[ConversationIssue]
+    missed_escalation: list[ConversationIssue]
+    dumb_questions: list[ConversationIssue]
+    lack_of_encouragement: list[ConversationIssue]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert analysis to dictionary for serialization.
+
+        Returns:
+            dict[str, Any]: Dictionary representation of the quality analysis results.
+        """
+        base = {
+            AnalysisKey.TOTAL_ANALYZED: self.total_analyzed,
+            AnalysisKey.REPETITIVE: [asdict(issue) for issue in self.repetitive],
+            AnalysisKey.UNHELPFUL: [asdict(issue) for issue in self.unhelpful],
+            AnalysisKey.TOO_MANY_TURNS: [
+                asdict(issue) for issue in self.too_many_turns
+            ],
+            AnalysisKey.DEAD_END: [asdict(issue) for issue in self.dead_end],
+            AnalysisKey.NEGATIVE_RATING: [
+                asdict(issue) for issue in self.negative_rating
+            ],
+            "obvious_wrong_answers": [
+                asdict(issue) for issue in self.obvious_wrong_answers
+            ],
+            "missed_escalation": [asdict(issue) for issue in self.missed_escalation],
+            "dumb_questions": [asdict(issue) for issue in self.dumb_questions],
+            "lack_of_encouragement": [
+                asdict(issue) for issue in self.lack_of_encouragement
+            ],
+        }
+
+        # Add summary statistics if AI analysis was performed
+        all_issues = (
+            self.repetitive
+            + self.unhelpful
+            + self.too_many_turns
+            + self.dead_end
+            + self.negative_rating
+            + self.obvious_wrong_answers
+            + self.missed_escalation
+            + self.dumb_questions
+            + self.lack_of_encouragement
+        )
+
+        if all_issues and any(issue.severity_score is not None for issue in all_issues):
+            scored_issues = [
+                issue for issue in all_issues if issue.severity_score is not None
+            ]
+            base["summary"] = {
+                "conversations_with_issues": len(
+                    set(issue.conversation_id for issue in all_issues)
+                ),
+                "average_severity": sum(i.severity_score for i in scored_issues)
+                / len(scored_issues)
+                if scored_issues
+                else 0,
+                "total_issues_found": len(all_issues),
+            }
+
+            # Add top offenders across all categories
+            top_offenders = sorted(
+                [issue for issue in all_issues if issue.severity_score is not None],
+                key=lambda x: x.severity_score,
+                reverse=True,
+            )[:20]
+            base["top_offenders"] = [asdict(issue) for issue in top_offenders]
+
+        return base
+
+
+class ConversationFetcher:
+    """Handles fetching conversations from the API.
+
+    Attributes:
+        base_url: Base URL for the API endpoint.
+    """
+
+    def __init__(self, *, base_url: str):
+        """Initialize the ConversationFetcher.
+
+        Args:
+            base_url: Base URL for the API endpoint.
+        """
+        self.base_url = base_url
+
+    def fetch_all(
+        self,
+        *,
+        include_messages: bool = True,
+        page_limit: int = DEFAULT_PAGE_LIMIT,
+        sort_by: str = DEFAULT_SORT_BY,
+        sort_direction: SortDirection = SortDirection.DESC,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> list[Conversation]:
+        """Fetch all conversations from the API with pagination.
+
+        Iterates through all pages of conversations until no more data is available
+        or the maximum number of pages is reached.
+        Logs progress for each page fetched.
+
+        Args:
+            include_messages: Whether to include full message history in the response.
+            page_limit: Number of conversations to fetch per page.
+            sort_by: Field to sort conversations by.
+            sort_direction: Sort direction (asc or desc).
+            max_pages: Maximum number of pages to fetch. Defaults to 5.
+
+        Returns:
+            list[Conversation]: List of all fetched Conversation objects.
+        """
+        url = f"{self.base_url}{API_CONVERSATION_LIST_ENDPOINT}"
+        all_conversations: list[Conversation] = []
+        page_token: str | None = None
+        page_num = FIRST_PAGE
+
+        while True:
+            if page_num > max_pages:
+                logger.info(LogMessage.MAX_PAGES_REACHED.format(max_pages))
+                break
+
+            payload = self._build_payload(
+                include_messages=include_messages,
+                limit=page_limit,
+                sort_by=sort_by,
+                sort_dir=sort_direction,
+                page_token=page_token,
+            )
+
+            logger.info(LogMessage.FETCHING_PAGE.format(page_num))
+
+            response = requests.post(url, json=payload)
+            response.raise_for_status()
+
+            data = response.json()
+            conversations_data = data.get(ApiResponseKey.FILTERED_CONVOS, [])
+
+            conversations = [
+                Conversation.from_dict(data=convo_data)
+                for convo_data in conversations_data
+            ]
+
+            all_conversations.extend(conversations)
+
+            logger.info(
+                LogMessage.RETRIEVED_CONVERSATIONS.format(
+                    len(conversations), len(all_conversations)
+                )
+            )
+
+            page_token = data.get(ApiResponseKey.NEXT_PAGE_TOKEN)
+            if not page_token or not conversations:
+                break
+
+            page_num += 1
+
+        return all_conversations
+
+    def _build_payload(
+        self,
+        *,
+        include_messages: bool,
+        limit: int,
+        sort_by: str,
+        sort_dir: SortDirection,
+        page_token: str | None,
+    ) -> dict[str, Any]:
+        """Build the API request payload.
+
+        Constructs the payload dictionary with filtering, sorting, and pagination parameters.
+        Includes page_token only if provided for subsequent pages.
+
+        Args:
+            include_messages: Whether to include messages in the response.
+            limit: Maximum number of conversations to return.
+            sort_by: Field to sort by.
+            sort_dir: Sort direction.
+            page_token: Token for fetching the next page, if available.
+
+        Returns:
+            dict[str, Any]: Payload dictionary ready for API request.
+        """
+        payload: dict[str, Any] = {
+            ApiRequestKey.FILTER: {},
+            ApiRequestKey.LIMIT: limit,
+            ApiRequestKey.SORT_BY: sort_by,
+            ApiRequestKey.SORT_DIR: sort_dir,
+            ApiRequestKey.INCLUDE_MESSAGES: include_messages,
+        }
+
+        if page_token:
+            payload[ApiRequestKey.PAGE_TOKEN] = page_token
+
+        return payload
+
+
+class ConversationAnalyzer:
+    """Analyzes conversations for quality issues.
+
+    Evaluates conversations against Tier 0 support criteria:
+    - Provides obvious answers when available
+    - Facilitates worthwhile human interaction when answer isn't obvious
+    - Doesn't ask dumb questions
+    - Avoids futile back & forth
+    - Encourages users to get their question answered
+
+    Attributes:
+        negative_rating_threshold: Rating below which is considered negative.
+        excessive_turns_threshold: Number of messages above which is considered excessive.
+    """
+
+    def __init__(
+        self,
+        *,
+        negative_rating_threshold: int = DEFAULT_NEGATIVE_RATING_THRESHOLD,
+        excessive_turns_threshold: int = DEFAULT_EXCESSIVE_TURNS_THRESHOLD,
+    ):
+        """Initialize the ConversationAnalyzer.
+
+        Args:
+            negative_rating_threshold: Rating threshold below which conversations are flagged.
+            excessive_turns_threshold: Message count threshold above which conversations are flagged.
+        """
+        self.negative_rating_threshold = negative_rating_threshold
+        self.excessive_turns_threshold = excessive_turns_threshold
+
+    def analyze(self, *, conversations: list[Conversation]) -> QualityAnalysis:
+        """Analyze conversations to identify potential issues with Tier 0 support.
+
+        Performs multiple checks on each conversation:
+        - Negative ratings below threshold
+        - Excessive back-and-forth turns indicating futile conversation
+
+        Additional sophisticated analysis is planned for future implementation:
+        - Detection of repetitive bot responses
+        - Identification of unhelpful responses
+        - Detection of dead-end conversations
+
+        Args:
+            conversations: List of conversations to analyze.
+
+        Returns:
+            QualityAnalysis: Object containing all identified issues categorized by type.
+        """
+        logger.info(LogMessage.ANALYSIS_HEADER)
+
+        repetitive: list[ConversationIssue] = []
+        unhelpful: list[ConversationIssue] = []
+        too_many_turns: list[ConversationIssue] = []
+        dead_end: list[ConversationIssue] = []
+        negative_rating: list[ConversationIssue] = []
+
+        for convo in conversations:
+            if (
+                convo.rating is not None
+                and convo.rating < self.negative_rating_threshold
+            ):
+                negative_rating.append(
+                    ConversationIssue(
+                        conversation_id=convo.id,
+                        issue_type=IssueType.NEGATIVE_RATING,
+                        details={
+                            DetailKey.RATING: convo.rating,
+                            DetailKey.MESSAGE_COUNT: len(convo.messages),
+                        },
+                    )
+                )
+
+            if len(convo.messages) > self.excessive_turns_threshold:
+                too_many_turns.append(
+                    ConversationIssue(
+                        conversation_id=convo.id,
+                        issue_type=IssueType.TOO_MANY_TURNS,
+                        details={
+                            DetailKey.TURNS: len(convo.messages),
+                            DetailKey.STATUS: convo.status,
+                        },
+                    )
+                )
+
+        analysis = QualityAnalysis(
+            total_analyzed=len(conversations),
+            repetitive=repetitive,
+            unhelpful=unhelpful,
+            too_many_turns=too_many_turns,
+            dead_end=dead_end,
+            negative_rating=negative_rating,
+            obvious_wrong_answers=[],
+            missed_escalation=[],
+            dumb_questions=[],
+            lack_of_encouragement=[],
+        )
+
+        self._print_summary(analysis=analysis)
+
+        return analysis
+
+    def _print_summary(self, *, analysis: QualityAnalysis) -> None:
+        """Print a summary of the analysis results.
+
+        Logs the total number of conversations analyzed and counts for each issue type.
+        Only displays issue types that have at least one occurrence.
+
+        Args:
+            analysis: QualityAnalysis object containing the analysis results.
+        """
+        logger.info(LogMessage.TOTAL_ANALYZED.format(analysis.total_analyzed))
+        logger.info(LogMessage.ISSUES_FOUND)
+
+        issue_counts = {
+            IssueType.REPETITIVE: len(analysis.repetitive),
+            IssueType.UNHELPFUL: len(analysis.unhelpful),
+            IssueType.TOO_MANY_TURNS: len(analysis.too_many_turns),
+            IssueType.DEAD_END: len(analysis.dead_end),
+            IssueType.NEGATIVE_RATING: len(analysis.negative_rating),
+        }
+
+        for issue_type, count in issue_counts.items():
+            if count > 0:
+                logger.info(LogMessage.ISSUE_COUNT.format(issue_type, count))
+
+
+class AIConversationAnalyzer:
+    """Analyzes conversations using GPT-5-mini for intelligent issue detection.
+
+    This analyzer uses OpenAI's GPT-5-mini model to identify Tier 0 support failures
+    including obvious wrong answers, missed escalations, dumb questions, futile loops,
+    and lack of encouragement.
+
+    Attributes:
+        client: AsyncOpenAI client for API calls.
+        model: Model name to use for analysis.
+        max_concurrency: Maximum number of concurrent API requests.
+        semaphore: Asyncio semaphore for rate limiting.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = DEFAULT_AI_MODEL,
+        max_concurrency: int = DEFAULT_AI_CONCURRENCY,
+    ):
+        """Initialize the AI analyzer.
+
+        Args:
+            api_key: OpenAI API key.
+            model: Model name to use (default: gpt-5-mini).
+            max_concurrency: Maximum concurrent requests.
+        """
+        self.client = AsyncOpenAI(api_key=api_key)
+        self.model = model
+        self.max_concurrency = max_concurrency
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+
+    def _build_analysis_prompt(self, *, conversation: Conversation) -> str:
+        """Build the analysis prompt for GPT-5-mini.
+
+        Args:
+            conversation: Conversation to analyze.
+
+        Returns:
+            str: Formatted prompt for the AI.
+        """
+        # Format the conversation for analysis
+        convo_text = []
+        for msg in conversation.messages:
+            convo_text.append(f"{msg.role}: {msg.content}")
+        conversation_str = "\n".join(convo_text)
+
+        return f"""Analyze this customer support conversation for Tier 0 support quality issues.
+
+TIER 0 SUPPORT DEFINITION:
+Good Tier 0 support means:
+- Providing obvious answers quickly when available
+- Facilitating worthwhile human interaction when the answer isn't obvious
+- NOT asking users dumb questions (questions the bot should already know or that are irrelevant)
+- Avoiding futile back & forth (repetitive, circular, making no progress)
+- Creating encouragement for users to get their questions answered
+
+CONVERSATION:
+{conversation_str}
+
+ANALYZE FOR THESE ANTI-PATTERNS:
+1. OBVIOUS_WRONG_ANSWER: Simple/obvious questions answered incorrectly
+2. MISSED_ESCALATION: Complex issues where Amirabot should have escalated to human but kept trying
+3. DUMB_QUESTION: Amirabot asking for info it should know or asking irrelevant questions
+4. REPETITIVE: Bot repeating same info, going in circles, making no progress
+5. LACK_OF_ENCOURAGEMENT: Discouraging tone, giving up, not helping user succeed
+6. DEAD_END: Conversation stalls with no path forward
+
+RESPOND IN JSON FORMAT:
+{{
+  "issues": [
+    {{
+      "type": "ISSUE_TYPE",
+      "severity": 1-10,
+      "reasoning": "Brief explanation of the issue",
+      "excerpt": "Relevant conversation excerpt showing the problem"
+    }}
+  ]
+}}
+
+If NO issues found, return: {{"issues": []}}
+
+Be critical and thorough. Only flag genuine Tier 0 failures."""
+
+    @retry(
+        stop=stop_after_attempt(DEFAULT_AI_MAX_RETRIES),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+    )
+    async def _analyze_single_conversation(
+        self, *, conversation: Conversation
+    ) -> list[ConversationIssue]:
+        """Analyze a single conversation using GPT-5-mini with retries.
+
+        Args:
+            conversation: Conversation to analyze.
+
+        Returns:
+            list[ConversationIssue]: List of identified issues.
+        """
+        async with self.semaphore:
+            prompt = self._build_analysis_prompt(conversation=conversation)
+
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert at analyzing customer support conversations for quality issues.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+
+                result = json.loads(response.choices[0].message.content)
+                issues = []
+
+                for issue_data in result.get("issues", []):
+                    issue_type_map = {
+                        "OBVIOUS_WRONG_ANSWER": IssueType.OBVIOUS_WRONG_ANSWER,
+                        "MISSED_ESCALATION": IssueType.MISSED_ESCALATION,
+                        "DUMB_QUESTION": IssueType.DUMB_QUESTION,
+                        "REPETITIVE": IssueType.REPETITIVE,
+                        "LACK_OF_ENCOURAGEMENT": IssueType.LACK_OF_ENCOURAGEMENT,
+                        "DEAD_END": IssueType.DEAD_END,
+                    }
+
+                    issue_type_str = issue_data.get("type", "")
+                    issue_type = issue_type_map.get(
+                        issue_type_str, IssueType.UNHELPFUL
+                    )
+
+                    issues.append(
+                        ConversationIssue(
+                            conversation_id=conversation.id,
+                            issue_type=issue_type,
+                            details={
+                                "message_count": len(conversation.messages),
+                                "status": conversation.status,
+                                "rating": conversation.rating,
+                            },
+                            severity_score=issue_data.get("severity", 5),
+                            ai_reasoning=issue_data.get("reasoning", ""),
+                            excerpt=issue_data.get("excerpt", ""),
+                        )
+                    )
+
+                return issues
+
+            except Exception as e:
+                logger.error(f"Error analyzing conversation {conversation.id}: {e}")
+                return []
+
+    async def analyze_async(
+        self, *, conversations: list[Conversation]
+    ) -> QualityAnalysis:
+        """Analyze all conversations asynchronously using GPT-5-mini.
+
+        Args:
+            conversations: List of conversations to analyze.
+
+        Returns:
+            QualityAnalysis: Complete analysis with AI-identified issues.
+        """
+        logger.info(
+            f"Starting AI analysis of {len(conversations)} conversations with {self.max_concurrency} concurrent requests..."
+        )
+
+        tasks = [
+            self._analyze_single_conversation(conversation=convo)
+            for convo in conversations
+        ]
+
+        # Process all conversations in parallel with progress tracking
+        results = []
+        completed = 0
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            completed += 1
+            if completed % 50 == 0 or completed == len(conversations):
+                logger.info(f"Analyzed {completed}/{len(conversations)} conversations...")
+
+        # Categorize all issues
+        obvious_wrong_answers = []
+        missed_escalation = []
+        dumb_questions = []
+        repetitive = []
+        lack_of_encouragement = []
+        dead_end = []
+        unhelpful = []
+
+        for issues_list in results:
+            for issue in issues_list:
+                if issue.issue_type == IssueType.OBVIOUS_WRONG_ANSWER:
+                    obvious_wrong_answers.append(issue)
+                elif issue.issue_type == IssueType.MISSED_ESCALATION:
+                    missed_escalation.append(issue)
+                elif issue.issue_type == IssueType.DUMB_QUESTION:
+                    dumb_questions.append(issue)
+                elif issue.issue_type == IssueType.REPETITIVE:
+                    repetitive.append(issue)
+                elif issue.issue_type == IssueType.LACK_OF_ENCOURAGEMENT:
+                    lack_of_encouragement.append(issue)
+                elif issue.issue_type == IssueType.DEAD_END:
+                    dead_end.append(issue)
+                else:
+                    unhelpful.append(issue)
+
+        # Sort each category by severity
+        for issue_list in [
+            obvious_wrong_answers,
+            missed_escalation,
+            dumb_questions,
+            repetitive,
+            lack_of_encouragement,
+            dead_end,
+            unhelpful,
+        ]:
+            issue_list.sort(key=lambda x: x.severity_score or 0, reverse=True)
+
+        analysis = QualityAnalysis(
+            total_analyzed=len(conversations),
+            repetitive=repetitive,
+            unhelpful=unhelpful,
+            too_many_turns=[],
+            dead_end=dead_end,
+            negative_rating=[],
+            obvious_wrong_answers=obvious_wrong_answers,
+            missed_escalation=missed_escalation,
+            dumb_questions=dumb_questions,
+            lack_of_encouragement=lack_of_encouragement,
+        )
+
+        logger.success(
+            f"AI analysis complete! Found {len(obvious_wrong_answers + missed_escalation + dumb_questions + repetitive + lack_of_encouragement + dead_end + unhelpful)} total issues"
+        )
+
+        return analysis
+
+
+class ConversationStorage:
+    """Handles saving conversations and analysis results to disk."""
+
+    def save_conversations(
+        self,
+        *,
+        conversations: list[Conversation],
+        filepath: Path | str = DEFAULT_CONVERSATIONS_OUTPUT,
+    ) -> None:
+        """Save conversations to a JSON file.
+
+        Converts all conversations to dictionaries and writes them to a JSON file
+        with proper indentation. Uses default string conversion for non-serializable types.
+
+        Args:
+            conversations: List of Conversation objects to save.
+            filepath: Path where the JSON file should be saved.
+        """
+        filepath = Path(filepath)
+
+        conversations_data = [convo.to_dict() for convo in conversations]
+
+        with filepath.open("w") as f:
+            json.dump(conversations_data, f, indent=JSON_INDENT, default=str)
+
+        logger.success(
+            LogMessage.SAVED_CONVERSATIONS.format(len(conversations), filepath)
+        )
+
+    def save_analysis(
+        self,
+        *,
+        analysis: QualityAnalysis,
+        filepath: Path | str = DEFAULT_ANALYSIS_OUTPUT,
+    ) -> None:
+        """Save quality analysis results to a JSON file.
+
+        Converts the analysis results to a dictionary and writes to a JSON file
+        with proper indentation. Uses default string conversion for non-serializable types.
+
+        Args:
+            analysis: QualityAnalysis object containing the analysis results.
+            filepath: Path where the JSON file should be saved.
+        """
+        filepath = Path(filepath)
+
+        with filepath.open("w") as f:
+            json.dump(analysis.to_dict(), f, indent=JSON_INDENT, default=str)
+
+        logger.success(LogMessage.SAVED_ANALYSIS.format(filepath))
+
+
+@app.command()
+def analyze(
+    max_pages: int = typer.Option(
+        DEFAULT_MAX_PAGES, "--max-pages", "-m", help=CliHelp.MAX_PAGES
+    ),
+    negative_rating_threshold: int = typer.Option(
+        DEFAULT_NEGATIVE_RATING_THRESHOLD,
+        "--negative-threshold",
+        "-n",
+        help=CliHelp.NEGATIVE_THRESHOLD,
+    ),
+    excessive_turns_threshold: int = typer.Option(
+        DEFAULT_EXCESSIVE_TURNS_THRESHOLD,
+        "--turns-threshold",
+        "-t",
+        help=CliHelp.TURNS_THRESHOLD,
+    ),
+    conversations_output: Path = typer.Option(
+        DEFAULT_CONVERSATIONS_OUTPUT,
+        "--conversations-output",
+        "-c",
+        help=CliHelp.CONVERSATIONS_OUTPUT,
+    ),
+    analysis_output: Path = typer.Option(
+        DEFAULT_ANALYSIS_OUTPUT, "--analysis-output", "-a", help=CliHelp.ANALYSIS_OUTPUT
+    ),
+    use_ai: bool = typer.Option(
+        False,
+        "--ai/--no-ai",
+        help="Use AI (GPT-5-mini) for intelligent issue detection instead of simple rules.",
+    ),
+    openai_api_key: str = typer.Option(
+        None,
+        "--openai-api-key",
+        envvar="OPENAI_API_KEY",
+        help="OpenAI API key for AI analysis. Can also be set via OPENAI_API_KEY environment variable.",
+    ),
+) -> None:
+    """Fetch and analyze Amirabot conversations for quality issues.
+
+    This command fetches conversations from the Amirabot API, analyzes them for
+    potential quality issues, and saves both the raw conversations and analysis
+    results to JSON files.
+    """
+    logger.info(LogMessage.FETCHING_ALL)
+
+    try:
+        fetcher = ConversationFetcher(base_url=AMIRABOT_API_BASE_URL)
+        storage = ConversationStorage()
+
+        conversations = fetcher.fetch_all(include_messages=True, max_pages=max_pages)
+
+        storage.save_conversations(
+            conversations=conversations, filepath=conversations_output
+        )
+
+        # Choose analyzer based on flags
+        if use_ai:
+            if not openai_api_key:
+                logger.error(
+                    "OpenAI API key required for AI analysis. Set OPENAI_API_KEY environment variable or use --openai-api-key flag."
+                )
+                raise typer.Exit(code=EXIT_CODE_ERROR)
+
+            ai_analyzer = AIConversationAnalyzer(api_key=openai_api_key)
+            analysis_result = asyncio.run(
+                ai_analyzer.analyze_async(conversations=conversations)
+            )
+        else:
+            analyzer = ConversationAnalyzer(
+                negative_rating_threshold=negative_rating_threshold,
+                excessive_turns_threshold=excessive_turns_threshold,
+            )
+            analysis_result = analyzer.analyze(conversations=conversations)
+
+        storage.save_analysis(analysis=analysis_result, filepath=analysis_output)
+
+    except Exception as e:
+        logger.exception(LogMessage.ERROR_OCCURRED.format(e))
+        raise typer.Exit(code=EXIT_CODE_ERROR)
+
+
+if __name__ == "__main__":
+    app()

@@ -1,0 +1,55 @@
+repos:
+  # Standard pre-commit hooks for code quality
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: ^(infra/cloudformation/.*\.yaml|monitoring/.*\.yml|template\.yaml|config/deployment/.*\.yaml)$
+      - id: check-json
+        exclude: ^node_modules/
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  # Python linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.2
+    hooks:
+      - id: ruff
+        name: ruff check
+        args: [--fix]
+      - id: ruff-format
+        name: ruff format
+
+  # Python security linter (optional - uncomment to enable)
+  # - repo: https://github.com/PyCQA/bandit
+  #   rev: 1.7.10
+  #   hooks:
+  #     - id: bandit
+  #       args: [-c, pyproject.toml]
+  #       additional_dependencies: ["bandit[toml]"]
+
+  # Local hooks for project-specific checks
+  - repo: local
+    hooks:
+      - id: pyrefly
+        name: pyrefly check
+        entry: uvx pyrefly check --summarize-errors
+        language: system
+        types: [python]
+        pass_filenames: false
+      # - id: pytest
+      #   name: pytest
+      #   entry: uv run pytest
+      #   language: system
+      #   types: [python]
+      #   pass_filenames: false
+      # - id: eslint-typescript
+      #   name: eslint (TypeScript)
+      #   entry: bash -c 'command -v pnpm >/dev/null 2>&1 && pkg=pnpm || pkg=npx; $pkg eslint "static/**/*.{ts,tsx,js,jsx}" --max-warnings=0'
+      #   language: system
+      #   types: [text]
+      #   pass_filenames: false

@@ -1,0 +1,26 @@
+[project]
+name = "amirabot-giftcard"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "aiolimiter>=1.2.1",
+    "httpx>=0.28.1",
+    "instructor>=1.13.0",
+    "loguru>=0.7.3",
+    "openai>=2.7.1",
+    "pandas>=2.3.3",
+    "polars>=1.35.1",
+    "pydantic>=2.12.4",
+    "python-dotenv>=1.2.1",
+    "reportlab>=4.2.5",
+    "requests>=2.32.5",
+    "rich>=14.2.0",
+    "tenacity>=9.1.2",
+    "typer>=0.20.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.3",
+]

@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data files (exclude raw conversation and issue data)
+conversations/
+conversation_analyses/
+conversations.json
+issues.json
+*.csv
+analyses/
+
+# Environment files
+.env
+
+# IDE and local settings
+.claude/settings.local.json
+
+# Allow output reports (override the exclusions above)
+!output/*.json
+!output/*.md
+!output/*.pdf

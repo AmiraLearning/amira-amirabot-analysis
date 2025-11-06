@@ -1,0 +1,213 @@
+{
+  "kpis": {
+    "total_conversations": 1001,
+    "pass_rate": 0.8371628371628371,
+    "fail_rate": 0.16283716283716285,
+    "avg_score": 87.56343656343657,
+    "obvious_answer_first_turn_pct": 0.8611388611388612,
+    "escalation_within_two_turns_pct": 0.7992007992007992,
+    "clear_next_step_pct": 0.7172827172827173,
+    "avg_cycles_without_progress": 0.24975024975024976,
+    "prize_candidates_count": 152,
+    "prize_candidates_pct": 0.15184815184815184
+  },
+  "triage": {
+    "fix_now": 196,
+    "high": 2,
+    "medium": 11,
+    "low": 792
+  },
+  "patterns": [
+    {
+      "issue_type": "DEAD_END",
+      "count": 165,
+      "coverage_pct": 0.16483516483516483,
+      "density": 1.0,
+      "severity_breakdown": {
+        "low": 21,
+        "medium": 69,
+        "high": 75
+      }
+    },
+    {
+      "issue_type": "MISSED_ESCALATION",
+      "count": 118,
+      "coverage_pct": 0.11788211788211789,
+      "density": 1.0,
+      "severity_breakdown": {
+        "low": 5,
+        "medium": 56,
+        "high": 57
+      }
+    },
+    {
+      "issue_type": "REPETITIVE",
+      "count": 98,
+      "coverage_pct": 0.0979020979020979,
+      "density": 1.0,
+      "severity_breakdown": {
+        "low": 13,
+        "medium": 44,
+        "high": 41
+      }
+    },
+    {
+      "issue_type": "OBVIOUS_WRONG_ANSWER",
+      "count": 76,
+      "coverage_pct": 0.07492507492507493,
+      "density": 1.0133333333333334,
+      "severity_breakdown": {
+        "low": 10,
+        "medium": 39,
+        "high": 27
+      }
+    },
+    {
+      "issue_type": "LACK_OF_ENCOURAGEMENT",
+      "count": 68,
+      "coverage_pct": 0.06793206793206794,
+      "density": 1.0,
+      "severity_breakdown": {
+        "low": 47,
+        "medium": 21,
+        "high": 0
+      }
+    },
+    {
+      "issue_type": "DUMB_QUESTION",
+      "count": 37,
+      "coverage_pct": 0.03696303696303696,
+      "density": 1.0,
+      "severity_breakdown": {
+        "low": 18,
+        "medium": 18,
+        "high": 1
+      }
+    }
+  ],
+  "actionable_fixes": {
+    "DEAD_END": {
+      "likely_cause": "Final turn lacks link/step/timeline",
+      "fixes": [
+        "Footer macro: one action, one link, one timeline\u2014always",
+        "Guard: every final bot message must have actionable next step"
+      ],
+      "priority": "critical",
+      "occurrence_count": 165,
+      "affected_conversations_pct": "16.5%",
+      "severity_breakdown": {
+        "low": 21,
+        "medium": 69,
+        "high": 75
+      },
+      "sample_conversations": [
+        ".json",
+        "82e25ff7-3ee0-4782-9987-d609fd468078",
+        "1c271241-7779-44dd-9d95-6f37b55c5254"
+      ]
+    },
+    "MISSED_ESCALATION": {
+      "likely_cause": "Bot keeps trying despite permissions/limited access",
+      "fixes": [
+        "Rule: \"If blocked \u22651 turn by identity/billing/file access \u2192 escalate\"",
+        "Add Handoff Macro with who/when/how + checklist",
+        "Instrument: flag any thread where same instruction is repeated twice"
+      ],
+      "priority": "critical",
+      "occurrence_count": 118,
+      "affected_conversations_pct": "11.8%",
+      "severity_breakdown": {
+        "low": 5,
+        "medium": 56,
+        "high": 57
+      },
+      "sample_conversations": [
+        "82e25ff7-3ee0-4782-9987-d609fd468078",
+        "25037dc8-8802-4b29-b0ef-28a05f5c30e4",
+        "6667cde3-3e2a-4ddd-9714-6222319b9fed"
+      ]
+    },
+    "REPETITIVE": {
+      "likely_cause": "No tactic switch after a failed step",
+      "fixes": [
+        "\"No-repeat\" guard: after a repeat, switch to escalation or new path",
+        "Add \"If X didn't work, try Y\" playbooks (device, network, SSO, roster)"
+      ],
+      "priority": "high",
+      "occurrence_count": 98,
+      "affected_conversations_pct": "9.8%",
+      "severity_breakdown": {
+        "low": 13,
+        "medium": 44,
+        "high": 41
+      },
+      "sample_conversations": [
+        "1c271241-7779-44dd-9d95-6f37b55c5254",
+        "25037dc8-8802-4b29-b0ef-28a05f5c30e4",
+        "766e7cd4-df53-4711-b75b-597514244258"
+      ]
+    },
+    "OBVIOUS_WRONG_ANSWER": {
+      "likely_cause": "Missing/ambiguous FAQ, retrieval misses",
+      "fixes": [
+        "Add/clarify FAQ snippet with canonical phrasing",
+        "Add deterministic pattern \u2192 answer rule for common questions",
+        "Retrieval tweak: boost exact-match titles/IDs for top intents"
+      ],
+      "priority": "high",
+      "occurrence_count": 76,
+      "affected_conversations_pct": "7.5%",
+      "severity_breakdown": {
+        "low": 10,
+        "medium": 39,
+        "high": 27
+      },
+      "sample_conversations": [
+        "d2eec253-5862-4247-a9fb-4ee59eaebc81",
+        "10b46ea7-e0e3-4631-9047-83a206598e7a",
+        "6ceb0b11-3b50-4c36-b853-c71ceca3d19c"
+      ]
+    },
+    "LACK_OF_ENCOURAGEMENT": {
+      "likely_cause": "Neutral/defensive tone, no path forward",
+      "fixes": [
+        "Add tone snippet bank with encouraging language",
+        "Always pair an apology with a next step or reassuring path"
+      ],
+      "priority": "medium",
+      "occurrence_count": 68,
+      "affected_conversations_pct": "6.8%",
+      "severity_breakdown": {
+        "low": 47,
+        "medium": 21,
+        "high": 0
+      },
+      "sample_conversations": [
+        "82e25ff7-3ee0-4782-9987-d609fd468078",
+        "1c271241-7779-44dd-9d95-6f37b55c5254",
+        "0cbc2a75-2ddf-4fe4-95f2-7f25bbd5d592"
+      ]
+    },
+    "DUMB_QUESTION": {
+      "likely_cause": "Bot not reading prior turns or metadata",
+      "fixes": [
+        "Context-check rule: \"Before asking, scan last 5 turns for the info\"",
+        "Restrict clarifying questions to one specific ask with rationale",
+        "Auto-infer common fields (email, role, district) from header when present"
+      ],
+      "priority": "high",
+      "occurrence_count": 37,
+      "affected_conversations_pct": "3.7%",
+      "severity_breakdown": {
+        "low": 18,
+        "medium": 18,
+        "high": 1
+      },
+      "sample_conversations": [
+        "25037dc8-8802-4b29-b0ef-28a05f5c30e4",
+        "766e7cd4-df53-4711-b75b-597514244258",
+        "bcd01249-0610-43aa-ac31-92af26748723"
+      ]
+    }
+  }
+}
