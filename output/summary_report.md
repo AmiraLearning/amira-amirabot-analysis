@@ -31,26 +31,26 @@
 
 ### FIX NOW (Critical Issues)
 
-**196 conversations require immediate attention**
+**94 conversations require immediate attention**
 
 - **.json**
   - Score: 0/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: DEAD_END
 
 - **82e25ff7-3ee0-4782-9987-d609fd468078**
   - Score: 10/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: MISSED_ESCALATION, DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **1c271241-7779-44dd-9d95-6f37b55c5254**
   - Score: 15/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: REPETITIVE, DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **0cbc2a75-2ddf-4fe4-95f2-7f25bbd5d592**
   - Score: 16/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **25037dc8-8802-4b29-b0ef-28a05f5c30e4**
@@ -60,17 +60,17 @@
 
 - **d2eec253-5862-4247-a9fb-4ee59eaebc81**
   - Score: 19/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: OBVIOUS_WRONG_ANSWER, DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **10b46ea7-e0e3-4631-9047-83a206598e7a**
   - Score: 20/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: OBVIOUS_WRONG_ANSWER, DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **6ceb0b11-3b50-4c36-b853-c71ceca3d19c**
   - Score: 20/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: OBVIOUS_WRONG_ANSWER, DEAD_END, LACK_OF_ENCOURAGEMENT
 
 - **766e7cd4-df53-4711-b75b-597514244258**
@@ -80,12 +80,12 @@
 
 - **6667cde3-3e2a-4ddd-9714-6222319b9fed**
   - Score: 24/100
-  - Reason: High-severity MISSED_ESCALATION or DEAD_END
+  - Reason: High-severity MISSED_ESCALATION or DEAD_END with low score
   - Issues: MISSED_ESCALATION, REPETITIVE, OBVIOUS_WRONG_ANSWER, DEAD_END
 
 ### HIGH Priority
 
-**2 conversations** need attention soon
+**65 conversations** need attention soon
 
 ---
 
@@ -93,8 +93,14 @@
 
 ### Issues by Type
 
-| Issue Type | Count | Coverage % | Density | High | Med | Low |
-|------------|-------|------------|---------|------|-----|-----|
+**Column Definitions:**
+- **Count**: Total number of flags of this type across all conversations
+- **Coverage %**: Percentage of conversations affected by this issue type
+- **Density**: Average flags per affected conversation (1.0 = each conversation has this issue once)
+- **Severity**: How severe each flag instance is (not conversation priority)
+
+| Issue Type | Count | Coverage % | Density | Severe | Moderate | Minor |
+|------------|-------|------------|---------|--------|----------|-------|
 | DEAD_END | 165 | 16.5% | 1.00 | 75 | 69 | 21 |
 | MISSED_ESCALATION | 118 | 11.8% | 1.00 | 57 | 56 | 5 |
 | REPETITIVE | 98 | 9.8% | 1.00 | 41 | 44 | 13 |

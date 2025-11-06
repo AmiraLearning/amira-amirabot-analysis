@@ -12,10 +12,10 @@
     "prize_candidates_pct": 0.15184815184815184
   },
   "triage": {
-    "fix_now": 196,
-    "high": 2,
-    "medium": 11,
-    "low": 792
+    "fix_now": 94,
+    "high": 65,
+    "medium": 17,
+    "low": 825
   },
   "patterns": [
     {

@@ -388,7 +388,10 @@ class ReportGenerator:
         return top_candidates
 
     def triage_conversations(self) -> list[ConversationTriage]:
-        """Triage conversations by priority based on severity and impact.
+        """Triage conversations by priority based on BLOCKING/IMPEDIMENT behaviors.
+
+        Priority focuses on conversations where bot actively blocks users from getting support,
+        not just general quality scores.
 
         Returns:
             List of triaged conversations sorted by priority
@@ -402,41 +405,56 @@ class ReportGenerator:
             score = conv.get("overall_score", 100)
             has_clear_next_step = conv.get("has_clear_next_step", False)
 
-            # Determine priority using thresholds
+            # Determine priority - focus on BLOCKING/IMPEDIMENT behaviors
             priority = "low"
-            reason = "Minor issues"
+            reason = "No significant blocking issues"
 
-            # Fix Now: Explicit hard-fail conditions (must meet score threshold too)
-            # Only mark as fix_now if BOTH: severe issues AND low score
-            if score < self.thresholds.score_low and any(
-                f.get("severity") == "high"
-                and f.get("type") in ["MISSED_ESCALATION", "DEAD_END"]
-                for f in flags
-            ):
-                priority = "fix_now"
-                reason = "High-severity MISSED_ESCALATION or DEAD_END with low score"
-            elif cycles >= self.thresholds.loops_fix_now and score < self.thresholds.score_high:
-                priority = "fix_now"
-                reason = f"Futile loop: {cycles} cycles without progress"
-            elif not has_clear_next_step and score < self.thresholds.score_low and any(
-                f.get("severity") == "high" and f.get("type") == "DEAD_END" for f in flags
-            ):
-                priority = "fix_now"
-                reason = "High-severity dead end with no clear next step and low score"
+            # PRIORITY 1: Prize candidates = confirmed impediments to support
+            if prize:
+                priority = "impediment"
+                reason = f"IMPEDIMENT: {conv.get('prize_reason', 'Bot blocked user from getting support')}"
+
+            # PRIORITY 2: Blocking behaviors - bot actively preventing support
             elif any(
-                f.get("severity") == "high" and f.get("type") == "OBVIOUS_WRONG_ANSWER"
+                f.get("severity") == "high"
+                and f.get("type") in ["MISSED_ESCALATION", "INTENT_MISRECOGNITION"]
                 for f in flags
-            ) and score < self.thresholds.score_low:
-                priority = "fix_now"
-                reason = "High-severity OBVIOUS_WRONG_ANSWER with low score"
-            elif prize:
-                priority = "high"
-                reason = "Prize candidate: clear impediment to good support"
+            ):
+                priority = "blocking"
+                blocking_types = [
+                    f.get("type")
+                    for f in flags
+                    if f.get("severity") == "high"
+                    and f.get("type") in ["MISSED_ESCALATION", "INTENT_MISRECOGNITION"]
+                ]
+                reason = f"BLOCKING: Bot refused escalation or missed critical user intent ({', '.join(set(blocking_types))})"
+
+            # PRIORITY 3: Time wasting - futile loops with no progress
+            elif cycles >= self.thresholds.loops_fix_now:
+                priority = "blocking"
+                reason = f"TIME WASTING: {cycles} cycles without progress - futile loop"
+
+            # PRIORITY 4: Dead end without escalation path
+            elif not has_clear_next_step and any(
+                f.get("type") == "DEAD_END" for f in flags
+            ):
+                priority = "friction"
+                reason = "DEAD END: No clear next step, user stuck without path forward"
+
+            # PRIORITY 5: High friction from repeated requests
+            elif any(
+                f.get("severity") == "high" and f.get("type") == "DUMB_QUESTION"
+                for f in flags
+            ):
+                priority = "friction"
+                reason = "FRICTION: Bot repeatedly asks for info already provided"
+
+            # Lower priority: Quality issues that don't block
             elif score < self.thresholds.score_low:
-                priority = "high"
-                reason = f"Low quality score: {score}/100"
+                priority = "low_quality"
+                reason = f"Low quality score: {score}/100 (but not blocking user)"
             elif score < self.thresholds.score_high:
-                priority = "medium"
+                priority = "minor"
                 reason = f"Below-average score: {score}/100"
 
             triaged.append(
@@ -451,9 +469,16 @@ class ReportGenerator:
                 )
             )
 
-        # Sort by priority
-        priority_order = {"fix_now": 0, "high": 1, "medium": 2, "low": 3}
-        triaged.sort(key=lambda x: (priority_order[x.priority], x.overall_score))
+        # Sort by priority - impediments first, then blocking, then friction
+        priority_order = {
+            "impediment": 0,  # Prize candidates - confirmed impediments
+            "blocking": 1,  # Actively blocking user from support
+            "friction": 2,  # Creating significant friction
+            "low_quality": 3,  # Poor quality but not blocking
+            "minor": 4,  # Minor issues
+            "low": 5,  # No significant issues
+        }
+        triaged.sort(key=lambda x: (priority_order.get(x.priority, 99), x.overall_score))
 
         return triaged
 
@@ -608,56 +633,81 @@ class ReportGenerator:
             Dictionary mapping issue types to fix recommendations
         """
         fix_map = {
-            "OBVIOUS_WRONG_ANSWER": {
-                "likely_cause": "Missing/ambiguous FAQ, retrieval misses",
-                "fixes": [
-                    "Add/clarify FAQ snippet with canonical phrasing",
-                    "Add deterministic pattern → answer rule for common questions",
-                    "Retrieval tweak: boost exact-match titles/IDs for top intents",
-                ],
-                "priority": "high",
-            },
             "MISSED_ESCALATION": {
+                "impediment_type": "BLOCKING - Prevents user from getting help",
                 "likely_cause": "Bot keeps trying despite permissions/limited access",
                 "fixes": [
-                    'Rule: "If blocked ≥1 turn by identity/billing/file access → escalate"',
-                    "Add Handoff Macro with who/when/how + checklist",
-                    "Instrument: flag any thread where same instruction is repeated twice",
+                    'CRITICAL: Rule: "If blocked ≥1 turn by identity/billing/file access → escalate immediately"',
+                    "Add Handoff Macro with who/when/how + checklist + timeline",
+                    "Detect when user explicitly asks for human help and escalate",
+                    "Instrument: flag any thread where same instruction is repeated twice without progress",
+                ],
+                "priority": "critical",
+            },
+            "INTENT_MISRECOGNITION": {
+                "impediment_type": "BLOCKING - Bot misses critical user intent",
+                "likely_cause": "Bot not recognizing cancellation, urgency, or escalation requests",
+                "fixes": [
+                    'Add intent detection for: cancellation ("cancel my", "stop", "delete my"), urgency ("urgent", "ASAP", "emergency"), escalation ("human", "person", "agent", "support")',
+                    'Escalate immediately on: billing/payment keywords, account closure, compliance/legal concerns',
+                    'Train on cancellation patterns: "I want to cancel", "please cancel", "how do I cancel"',
+                    'Priority keywords should trigger immediate escalation handoff',
+                ],
+                "priority": "critical",
+            },
+            "REPETITIVE": {
+                "impediment_type": "TIME WASTING - Futile loops",
+                "likely_cause": "No tactic switch after a failed step",
+                "fixes": [
+                    'CRITICAL: "No-repeat" guard: after 2 cycles, automatically escalate or switch approach',
+                    'Add "If X didn\'t work, try Y" playbooks (device, network, SSO, roster)',
+                    "Detect when bot gives same response twice → trigger escalation offer",
+                    "Track progress in conversation state; escalate if no forward motion",
+                ],
+                "priority": "critical",
+            },
+            "DEAD_END": {
+                "impediment_type": "BLOCKING - User has no path forward",
+                "likely_cause": "Final turn lacks link/step/timeline/escalation",
+                "fixes": [
+                    "CRITICAL: Every final bot message MUST include: actionable step OR link OR escalation offer OR timeline",
+                    "Footer macro: one action, one link, one timeline—always",
+                    "If bot can't solve: offer escalation as default closing",
+                    'Add fallback: "If this doesn\'t resolve it, reply \'human\' and I\'ll escalate to support"',
                 ],
                 "priority": "critical",
             },
             "DUMB_QUESTION": {
+                "impediment_type": "FRICTION - Forces user to repeat information",
                 "likely_cause": "Bot not reading prior turns or metadata",
                 "fixes": [
                     'Context-check rule: "Before asking, scan last 5 turns for the info"',
                     "Restrict clarifying questions to one specific ask with rationale",
                     "Auto-infer common fields (email, role, district) from header when present",
+                    "Track what user already provided; never ask twice for same info",
                 ],
                 "priority": "high",
             },
-            "REPETITIVE": {
-                "likely_cause": "No tactic switch after a failed step",
+            "OBVIOUS_WRONG_ANSWER": {
+                "impediment_type": "DAMAGE - Wrong info confuses user",
+                "likely_cause": "Missing/ambiguous FAQ, retrieval misses",
                 "fixes": [
-                    '"No-repeat" guard: after a repeat, switch to escalation or new path',
-                    'Add "If X didn\'t work, try Y" playbooks (device, network, SSO, roster)',
+                    "Add/clarify FAQ snippet with canonical phrasing",
+                    "Add deterministic pattern → answer rule for common questions",
+                    "Retrieval tweak: boost exact-match titles/IDs for top intents",
+                    "If uncertain, escalate instead of guessing",
                 ],
                 "priority": "high",
             },
             "LACK_OF_ENCOURAGEMENT": {
+                "impediment_type": "DISCOURAGING - No path to success",
                 "likely_cause": "Neutral/defensive tone, no path forward",
                 "fixes": [
                     "Add tone snippet bank with encouraging language",
                     "Always pair an apology with a next step or reassuring path",
+                    "Offer escalation as supportive option, not failure",
                 ],
                 "priority": "medium",
-            },
-            "DEAD_END": {
-                "likely_cause": "Final turn lacks link/step/timeline",
-                "fixes": [
-                    "Footer macro: one action, one link, one timeline—always",
-                    "Guard: every final bot message must have actionable next step",
-                ],
-                "priority": "critical",
             },
         }
 

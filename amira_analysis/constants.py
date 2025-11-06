@@ -94,6 +94,7 @@ class IssueType(StrEnum):
     MISSED_ESCALATION = "missed_escalation"
     DUMB_QUESTION = "dumb_question"
     LACK_OF_ENCOURAGEMENT = "lack_of_encouragement"
+    INTENT_MISRECOGNITION = "intent_misrecognition"
 
 
 class AnalysisKey(StrEnum):

@@ -38,6 +38,7 @@ class IssueTypeEnum(str, Enum):
     REPETITIVE = "REPETITIVE"
     LACK_OF_ENCOURAGEMENT = "LACK_OF_ENCOURAGEMENT"
     DEAD_END = "DEAD_END"
+    INTENT_MISRECOGNITION = "INTENT_MISRECOGNITION"
 
 
 class SeverityLevel(str, Enum):
@@ -317,10 +318,10 @@ class AIConversationAnalyzer:
             convo_text.append(line)
         conversation_str = "\n".join(convo_text)
 
-        return f"""SYSTEM ROLE: Tier-0 Support Quality Evaluator (for Amira's email/web chatbot)
+        return f"""SYSTEM ROLE: Tier-0 Support Impediment Detector (for Amira's email/web chatbot)
 
 OBJECTIVE
-Evaluate a single customer-support conversation for Tier-0 quality issues and return a structured, actionable report. Focus on whether the bot quickly provides obvious answers, knows when to escalate, avoids wasting the user's time, and keeps the user encouraged and moving forward.
+Identify where Amirabot is **actively impeding or blocking users from getting good support**. The goal is NOT general quality scoring, but finding specific behaviors where the bot creates damage: wasting user time, blocking escalation, misunderstanding critical user intent, or creating frustration through futile loops. Focus on IMPEDIMENTS, not just wrong answers.
 
 CONTEXT (READ CAREFULLY)
 - Product: Amira (K-12 literacy platform). Channel: online/email support chatbot.
@@ -331,22 +332,24 @@ CONTEXT (READ CAREFULLY)
 INPUT
 {conversation_str}
 
-TIER-0 "GOOD" DEFINITION (what success looks like)
+TIER-0 SUCCESS (not blocking user)
 - Fast, obvious answers when they exist.
 - Helpful handoff or human escalation when the answer isn't obvious or requires privileged actions.
-- No "dumb" questions (asking for info the bot already has or is irrelevant).
+- No "dumb" questions (asking for info the bot already has).
 - No futile back-and-forth (repetition, circular replies, no progress).
-- Encouraging, facilitating tone that helps the user succeed (suggests next steps, links, checklists, or escalation).
+- Recognizes user intent (cancellation, urgent requests, escalation requests).
+- Encouraging, facilitating tone that keeps user moving forward.
 
-ANTI-PATTERNS TO FLAG (use these exact labels)
-1) OBVIOUS_WRONG_ANSWER — Incorrect reply to a simple, obvious question.
-2) MISSED_ESCALATION — Complex/blocked issue should have been escalated; bot kept churning.
-3) DUMB_QUESTION — Bot asks for info already in the thread (email, role, school, district, error text, prior steps) or that's obviously irrelevant.
-4) REPETITIVE — Circular, redundant replies to **LEGITIMATE AMIRA QUESTIONS** with no forward motion (count these as cycles_without_progress).
+CRITICAL IMPEDIMENTS TO FLAG (use these exact labels - prioritize BLOCKING behaviors)
+1) MISSED_ESCALATION — **BLOCKING**: Bot refuses/fails to escalate when user is clearly stuck or needs human help. Bot keeps churning despite user being blocked.
+2) REPETITIVE — **TIME WASTING**: 2+ cycles of circular replies to **LEGITIMATE AMIRA QUESTIONS** with no new action/resource (count as cycles_without_progress).
    **CRITICAL: It is CORRECT and EXPECTED for the bot to repeat "I can only answer questions about Amira" for off-topic/irrelevant questions.**
    **ONLY flag REPETITIVE when the bot repeats unhelpful responses to VALID Amira-related questions without making progress.**
-5) LACK_OF_ENCOURAGEMENT — Discouraging tone or no pathways to success.
-6) DEAD_END — Conversation stalls with no clear next step (no link, no form, no escalation, no timeline). Check has_clear_next_step.
+3) INTENT_MISRECOGNITION — **BLOCKING**: Bot fails to recognize critical user intent like cancellation requests, urgent issues, explicit escalation requests, or account/billing issues.
+4) DUMB_QUESTION — **FRICTION**: Bot asks for info already in the thread (email, role, school, district, error text, prior steps) making user repeat themselves.
+5) DEAD_END — **BLOCKING**: Conversation stalls with no clear next step (no link, no form, no escalation, no timeline). Check has_clear_next_step.
+6) OBVIOUS_WRONG_ANSWER — **DAMAGE**: Incorrect reply to a simple, obvious question causing confusion.
+7) LACK_OF_ENCOURAGEMENT — **DISCOURAGING**: Tone creates discouragement or no pathway to success.
 
 IMPORTANT EVALUATION RULES
 - **Repeating "I can only answer questions about Amira" for off-topic questions is CORRECT BEHAVIOR. Do NOT flag as REPETITIVE.**
@@ -370,24 +373,39 @@ SCORING RUBRIC (0–100) — REWEIGHTED FOR TIER 0 BEHAVIORS
 - Tone & encouragement: 15
 - Avoids dead ends (clear next step): 5
 
-HARD-FAIL TRIGGERS (set overall_verdict="FAIL" and prize_candidate=true regardless of score)
-- Any high-severity MISSED_ESCALATION flag.
-- ≥2 cycles of REPETITIVE with no new action or resource (cycles_without_progress ≥ 2).
-- Final bot turn lacks action/link/escalation/timeframe (has_clear_next_step=false and DEAD_END flagged).
-- Bot asks for info already in thread or obvious from context (DUMB_QUESTION with high severity).
+PRIZE CANDIDATE CRITERIA ($500 gift card - **PRIMARY FOCUS**)
+Set prize_candidate=true and provide prize_reason when the bot is **ACTIVELY BLOCKING/IMPEDING SUPPORT**:
+
+**MUST HAVE** one or more of these BLOCKING behaviors:
+- **Missed Escalation (BLOCKING)**: User stuck/blocked, explicitly asks for help or tries multiple times, bot refuses to escalate
+- **Futile Loops (TIME WASTING)**: ≥2 cycles of same unhelpful response to valid Amira questions, no progress
+- **Intent Misrecognition (BLOCKING)**: Bot completely misses critical intent (cancellation, urgent issue, escalation request)
+- **Dead End + No Escalation (BLOCKING)**: Conversation stalls, user has no path forward, bot doesn't offer escalation
+
+**AND** demonstrates clear damage/impediment:
+- User likely frustrated or time wasted
+- Bot created barrier to getting support
+- User needs could have been met with proper escalation
+- Clear example that shows systemic problem (not just one-off error)
+
+**NOT prize candidates** (unless also blocking):
+- Simple wrong answer that doesn't block user
+- Minor tone issues
+- Dumb question that user can answer quickly
+- Off-topic conversations with correct refusals
+
+HARD-FAIL TRIGGERS (set overall_verdict="FAIL" - but evaluate prize_candidate separately)
+- Any high-severity MISSED_ESCALATION flag
+- ≥2 cycles_without_progress (REPETITIVE with no new action)
+- High-severity INTENT_MISRECOGNITION (missed cancellation, urgent issue, escalation request)
+- Final bot turn lacks action/link/escalation/timeframe (has_clear_next_step=false and DEAD_END flagged)
 
 WORTHWHILE HUMAN INTERACTION (explicit requirement)
 - If blocked by permissions/identity/billing/limited file access for >1 turn,
-  MUST provide a clear, warm escalation with: who to contact, when, how, and what info to have ready.
-- Escalation quality matters more than correctness. A polite "let me connect you to someone who can help" beats
-  multiple failed attempts.
-
-PRIZE CANDIDATE CRITERIA ($500 gift card for identifying impediments to good support)
-Set prize_candidate=true and provide prize_reason when the conversation clearly demonstrates:
-- Bot was an impediment to user getting good support (not just a wrong answer)
-- Violated core Tier 0 principles: futile back-and-forth, dumb questions, missed escalation, lack of encouragement
-- User likely frustrated or time wasted due to bot behavior
-- Clear, specific example that could drive actionable improvements
+  MUST provide a clear, warm escalation with: who to contact, when, how, and what info to have ready
+- **Escalation quality matters more than correctness**: A polite "let me connect you to someone who can help" beats
+  multiple failed attempts
+- Missing escalation when user is blocked = PRIMARY IMPEDIMENT
 
 PROGRESS TRACKING
 - Count cycles_without_progress: back-and-forth loops where bot provides same/similar response without new action
@@ -427,6 +445,7 @@ CONSTRAINTS
             IssueTypeEnum.REPETITIVE: IssueType.REPETITIVE,
             IssueTypeEnum.LACK_OF_ENCOURAGEMENT: IssueType.LACK_OF_ENCOURAGEMENT,
             IssueTypeEnum.DEAD_END: IssueType.DEAD_END,
+            IssueTypeEnum.INTENT_MISRECOGNITION: IssueType.INTENT_MISRECOGNITION,
         }
 
         # Map severity to numeric score (low=3, medium=6, high=9)
