@@ -406,28 +406,29 @@ class ReportGenerator:
             priority = "low"
             reason = "Minor issues"
 
-            # Fix Now: Explicit hard-fail conditions
-            if any(
+            # Fix Now: Explicit hard-fail conditions (must meet score threshold too)
+            # Only mark as fix_now if BOTH: severe issues AND low score
+            if score < self.thresholds.score_low and any(
                 f.get("severity") == "high"
                 and f.get("type") in ["MISSED_ESCALATION", "DEAD_END"]
                 for f in flags
             ):
                 priority = "fix_now"
-                reason = "High-severity MISSED_ESCALATION or DEAD_END"
-            elif cycles >= self.thresholds.loops_fix_now:
+                reason = "High-severity MISSED_ESCALATION or DEAD_END with low score"
+            elif cycles >= self.thresholds.loops_fix_now and score < self.thresholds.score_high:
                 priority = "fix_now"
                 reason = f"Futile loop: {cycles} cycles without progress"
-            elif not has_clear_next_step and any(
-                f.get("type") == "DEAD_END" for f in flags
+            elif not has_clear_next_step and score < self.thresholds.score_low and any(
+                f.get("severity") == "high" and f.get("type") == "DEAD_END" for f in flags
             ):
                 priority = "fix_now"
-                reason = "Final turn has no clear next step"
+                reason = "High-severity dead end with no clear next step and low score"
             elif any(
                 f.get("severity") == "high" and f.get("type") == "OBVIOUS_WRONG_ANSWER"
                 for f in flags
-            ):
+            ) and score < self.thresholds.score_low:
                 priority = "fix_now"
-                reason = "High-severity OBVIOUS_WRONG_ANSWER"
+                reason = "High-severity OBVIOUS_WRONG_ANSWER with low score"
             elif prize:
                 priority = "high"
                 reason = "Prize candidate: clear impediment to good support"
@@ -897,8 +898,14 @@ class ReportGenerator:
                 "",
                 "### Issues by Type",
                 "",
-                "| Issue Type | Count | Coverage % | Density | High | Med | Low |",
-                "|------------|-------|------------|---------|------|-----|-----|",
+                "**Column Definitions:**",
+                "- **Count**: Total number of flags of this type across all conversations",
+                "- **Coverage %**: Percentage of conversations affected by this issue type",
+                "- **Density**: Average flags per affected conversation (1.0 = each conversation has this issue once)",
+                "- **Severity**: How severe each flag instance is (not conversation priority)",
+                "",
+                "| Issue Type | Count | Coverage % | Density | Severe | Moderate | Minor |",
+                "|------------|-------|------------|---------|--------|----------|-------|",
             ]
         )
 
@@ -1277,9 +1284,16 @@ class ReportGenerator:
         # Pattern Analysis
         story.append(Paragraph("Pattern Analysis", heading_style))
         story.append(Paragraph("Issues by Type", subheading_style))
+        story.append(
+            Paragraph(
+                "<i>Note: Severity columns show how severe each flag instance is (not conversation priority)</i>",
+                styles["Italic"],
+            )
+        )
+        story.append(Spacer(1, 0.1 * inch))
 
         pattern_data = [
-            ["Issue Type", "Count", "Coverage", "Density", "High", "Med", "Low"]
+            ["Issue Type", "Count", "Coverage", "Density", "Severe", "Moderate", "Minor"]
         ]
         for pattern in patterns[:10]:  # Top 10
             sev = pattern.severity_breakdown
